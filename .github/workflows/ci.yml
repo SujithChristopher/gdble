@@ -17,9 +17,9 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: macos-13
+          - os: macos-13-intel
             target: x86_64-apple-darwin
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
 
     steps:
@@ -31,19 +31,19 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/registry
           key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo index
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: ~/.cargo/git
           key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Cache cargo build
-        uses: actions/cache@v3
+        uses: actions/cache@v4
         with:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
@@ -67,19 +67,19 @@ jobs:
           cp target/x86_64-unknown-linux-gnu/release/libgdble.so addons/gdble/bin/linux-x86_64/libgdble.so
 
       - name: Prepare artifacts (macOS x86_64)
-        if: matrix.os == 'macos-13'
+        if: matrix.os == 'macos-13-intel'
         run: |
           mkdir -p addons/gdble/bin/macos-x86_64
           cp target/x86_64-apple-darwin/release/libgdble.dylib addons/gdble/bin/macos-x86_64/libgdble.dylib
 
       - name: Prepare artifacts (macOS arm64)
-        if: matrix.os == 'macos-14'
+        if: matrix.os == 'macos-latest'
         run: |
           mkdir -p addons/gdble/bin/macos-arm64
           cp target/aarch64-apple-darwin/release/libgdble.dylib addons/gdble/bin/macos-arm64/libgdble.dylib
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: gdble-${{ matrix.target }}
           path: addons/gdble/bin/
