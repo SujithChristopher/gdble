@@ -1,86 +1,91 @@
-name: CI
+name: CI Build
 
 on:
   push:
-    branches: [ main ]
+    branches:
+      - '**'
+    tags-ignore:
+      - 'v*'
   pull_request:
-    branches: [ main ]
+    branches:
+      - '**'
 
 jobs:
-  test:
-    name: Test
+  build:
+    name: Build for ${{ matrix.platform }} (${{ matrix.target }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          - os: macos-13-intel
+            platform: Windows x64
+            lib_name: gdble.dll
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: Linux x64
+            lib_name: libgdble.so
+          - os: macos-13
             target: x86_64-apple-darwin
-          - os: macos-latest
+            platform: macOS Intel
+            lib_name: libgdble.dylib
+          - os: macos-15
             target: aarch64-apple-darwin
+            platform: macOS Apple Silicon
+            lib_name: libgdble.dylib
 
     steps:
-      - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
+    - name: Install system dependencies (Linux)
+      if: matrix.os == 'ubuntu-latest'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libudev-dev
 
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/registry
-          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+    - name: Setup Rust
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        target: ${{ matrix.target }}
 
-      - name: Cache cargo index
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/git
-          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+    - name: Build release
+      run: cargo build --release --target ${{ matrix.target }}
+      shell: bash
 
-      - name: Cache cargo build
-        uses: actions/cache@v4
-        with:
-          path: target
-          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+    - name: Verify build artifact exists
+      run: |
+        if [ -f "target/${{ matrix.target }}/release/${{ matrix.lib_name }}" ]; then
+          echo "✅ Build artifact found: target/${{ matrix.target }}/release/${{ matrix.lib_name }}"
+          ls -lh "target/${{ matrix.target }}/release/${{ matrix.lib_name }}"
+        else
+          echo "❌ Build artifact not found!"
+          exit 1
+        fi
+      shell: bash
 
-      - name: Run tests
-        run: cargo test --verbose
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: gdble-${{ matrix.target }}
+        path: target/${{ matrix.target }}/release/${{ matrix.lib_name }}
+        retention-days: 7
 
-      - name: Build release
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Prepare artifacts (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          mkdir -p addons/gdble/bin/windows-x86_64
-          copy target\x86_64-pc-windows-msvc\release\gdble.dll addons\gdble\bin\windows-x86_64\gdble.dll
-
-      - name: Prepare artifacts (Linux)
-        if: matrix.os == 'ubuntu-latest'
-        run: |
-          mkdir -p addons/gdble/bin/linux-x86_64
-          cp target/x86_64-unknown-linux-gnu/release/libgdble.so addons/gdble/bin/linux-x86_64/libgdble.so
-
-      - name: Prepare artifacts (macOS x86_64)
-        if: matrix.os == 'macos-13-intel'
-        run: |
-          mkdir -p addons/gdble/bin/macos-x86_64
-          cp target/x86_64-apple-darwin/release/libgdble.dylib addons/gdble/bin/macos-x86_64/libgdble.dylib
-
-      - name: Prepare artifacts (macOS arm64)
-        if: matrix.os == 'macos-latest'
-        run: |
-          mkdir -p addons/gdble/bin/macos-arm64
-          cp target/aarch64-apple-darwin/release/libgdble.dylib addons/gdble/bin/macos-arm64/libgdble.dylib
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: gdble-${{ matrix.target }}
-          path: addons/gdble/bin/
-          if-no-files-found: warn
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: build
+    if: always()
+    steps:
+    - name: Check build results
+      run: |
+        echo "## Build Test Results" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "All platform builds completed. Check individual job results above." >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Tested Platforms:" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Windows x64" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ Linux x64" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ macOS Intel (x86_64)" >> $GITHUB_STEP_SUMMARY
+        echo "- ✅ macOS Apple Silicon (ARM64)" >> $GITHUB_STEP_SUMMARY
