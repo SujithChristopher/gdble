@@ -88,8 +88,9 @@ impl BLEDevice {
         self.address.clone()
     }
 
+    /// Named ble_is_connected to avoid conflict with GDScript's built-in Object.is_connected().
     #[func]
-    fn is_connected(&self) -> bool {
+    fn ble_is_connected(&self) -> bool {
         self.is_connected
     }
 
@@ -97,8 +98,9 @@ impl BLEDevice {
 
     /// Connect to this device and automatically discover services.
     /// Blocking — call from a GDScript Thread.
+    /// Named ble_connect to avoid conflict with GDScript's built-in Object.connect().
     #[func]
-    fn connect(&mut self) -> bool {
+    fn ble_connect(&mut self) -> bool {
         let runtime_guard = self.runtime.lock().unwrap();
         let peripheral = self.peripheral.lock().unwrap();
 
@@ -124,8 +126,9 @@ impl BLEDevice {
     }
 
     /// Disconnect and abort any active notification stream.
+    /// Named ble_disconnect to avoid conflict with GDScript's built-in Object.disconnect().
     #[func]
-    fn disconnect(&mut self) -> bool {
+    fn ble_disconnect(&mut self) -> bool {
         self._abort_notification_task();
 
         let runtime_guard = self.runtime.lock().unwrap();
