@@ -1,0 +1,11 @@
+# Avoid copying local build artifacts and git data into the container
+target/
+.git/
+.github/
+.gitignore
+*.sh
+*.ps1
+*.bat
+Containerfile
+.dockerignore
+addons/
