@@ -11,3 +11,6 @@ godot = "0.5.0"
 simplersble = "0.12.1"
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
+
+[patch.crates-io]
+simplersble = { path = "vendor/simplersble" }

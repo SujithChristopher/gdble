@@ -1,5 +1,8 @@
 # Build GdBLE for Android arm64-v8a using Podman
 $ErrorActionPreference = "Stop"
+if ($PSVersionTable.PSVersion.Major -ge 7) {
+    $PSNativeCommandUseErrorActionPreference = $true
+}
 
 # Use location of script as working directory
 $scriptPath = Split-Path -Parent $MyInvocation.MyCommand.Definition
@@ -36,6 +39,9 @@ try {
 # Build the build container
 Write-Host "Building Podman image..." -ForegroundColor Cyan
 podman build -t gdble-android-builder -f Containerfile .
+if ($LASTEXITCODE -ne 0) {
+    throw "Podman image build failed."
+}
 
 # Build the extension for Android
 # On Windows, we need to ensure the volume path is handled correctly by Podman
@@ -45,6 +51,9 @@ $currentDir = (Get-Item .).FullName
 Write-Host "Building GdBLE for Android (aarch64-linux-android)..." -ForegroundColor Cyan
 podman run --rm -v "${currentDir}:/workspace" gdble-android-builder `
     cargo build --release --target aarch64-linux-android
+if ($LASTEXITCODE -ne 0) {
+    throw "Android cargo build failed."
+}
 
 # Create destination directories
 $targetBinSubdir = "android"

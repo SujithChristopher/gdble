@@ -17,6 +17,8 @@ macos.debug.x86_64 =     "res://addons/gdble/bin/macos-x86_64/libgdble.dylib"
 macos.release.x86_64 =   "res://addons/gdble/bin/macos-x86_64/libgdble.dylib"
 macos.debug.arm64 =      "res://addons/gdble/bin/macos-arm64/libgdble.dylib"
 macos.release.arm64 =    "res://addons/gdble/bin/macos-arm64/libgdble.dylib"
+android.debug.arm64 =    "res://addons/gdble/bin/android/libgdble.so"
+android.release.arm64 =  "res://addons/gdble/bin/android/libgdble.so"
 
 [documentation]
 

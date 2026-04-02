@@ -11,7 +11,7 @@ use tokio::task::JoinHandle;
 #[class(base=RefCounted)]
 pub struct BLEDevice {
     base: Base<RefCounted>,
-    peripheral: Arc<Peripheral>,
+    peripheral: Option<Arc<Peripheral>>,
     runtime: Arc<Mutex<Option<Runtime>>>,
     name: GString,
     address: GString,
@@ -29,7 +29,7 @@ impl IRefCounted for BLEDevice {
         // use from_peripheral() instead.
         Self {
             base,
-            peripheral: Arc::new(unsafe { std::mem::zeroed() }),
+            peripheral: None,
             runtime: Arc::new(Mutex::new(None)),
             name: GString::from("Unknown"),
             address: GString::from(""),
@@ -57,7 +57,7 @@ impl BLEDevice {
 
         Self {
             base,
-            peripheral: Arc::new(peripheral),
+            peripheral: Some(Arc::new(peripheral)),
             runtime,
             name: GString::from(name.as_str()),
             address: GString::from(address.as_str()),
@@ -94,7 +94,12 @@ impl BLEDevice {
     /// Named ble_connect to avoid conflict with GDScript's built-in connect().
     #[func]
     fn ble_connect(&mut self) -> bool {
-        match self.peripheral.connect() {
+        let Some(peripheral) = self.peripheral() else {
+            godot_error!("GdBLE: Device handle is not initialized");
+            return false;
+        };
+
+        match peripheral.connect() {
             Ok(_) => {
                 self.is_connected = true;
                 godot_print!("GdBLE: Connected to '{}'", self.name);
@@ -111,8 +116,13 @@ impl BLEDevice {
     /// Named ble_disconnect to avoid conflict with GDScript's built-in disconnect().
     #[func]
     fn ble_disconnect(&mut self) -> bool {
+        let Some(peripheral) = self.peripheral() else {
+            godot_error!("GdBLE: Device handle is not initialized");
+            return false;
+        };
+
         self._abort_all_tasks();
-        match self.peripheral.disconnect() {
+        match peripheral.disconnect() {
             Ok(_) => {
                 self.is_connected = false;
                 godot_print!("GdBLE: Disconnected from '{}'", self.name);
@@ -139,9 +149,13 @@ impl BLEDevice {
         let svc = service_uuid.to_string();
         let chr = char_uuid.to_string();
         let key = chr.to_lowercase();
+        let Some(peripheral) = self.peripheral() else {
+            godot_error!("GdBLE: Device handle is not initialized");
+            return false;
+        };
 
         // Ask the C++ library to start sending notifications and get the event stream.
-        let stream = match self.peripheral.notify(&svc, &chr) {
+        let stream = match peripheral.notify(&svc, &chr) {
             Ok(s) => s,
             Err(e) => {
                 godot_error!("GdBLE: notify() failed: {}", e);
@@ -181,7 +195,12 @@ impl BLEDevice {
     fn unsubscribe(&mut self, service_uuid: GString, char_uuid: GString) -> bool {
         let svc = service_uuid.to_string();
         let chr = char_uuid.to_string();
-        match self.peripheral.unsubscribe(&svc, &chr) {
+        let Some(peripheral) = self.peripheral() else {
+            godot_error!("GdBLE: Device handle is not initialized");
+            return false;
+        };
+
+        match peripheral.unsubscribe(&svc, &chr) {
             Ok(_) => true,
             Err(e) => {
                 godot_error!("GdBLE: unsubscribe failed: {}", e);
@@ -216,7 +235,12 @@ impl BLEDevice {
         let svc = service_uuid.to_string();
         let chr = characteristic_uuid.to_string();
         let bytes = data.to_vec();
-        match self.peripheral.write_command(&svc, &chr, &bytes) {
+        let Some(peripheral) = self.peripheral() else {
+            godot_error!("GdBLE: Device handle is not initialized");
+            return false;
+        };
+
+        match peripheral.write_command(&svc, &chr, &bytes) {
             Ok(_) => true,
             Err(e) => {
                 godot_error!("GdBLE: write_command failed: {}", e);
@@ -234,7 +258,12 @@ impl BLEDevice {
         }
         let svc = service_uuid.to_string();
         let chr = characteristic_uuid.to_string();
-        match self.peripheral.read(&svc, &chr) {
+        let Some(peripheral) = self.peripheral() else {
+            godot_error!("GdBLE: Device handle is not initialized");
+            return result;
+        };
+
+        match peripheral.read(&svc, &chr) {
             Ok(data) => {
                 for byte in data {
                     result.push(byte);
@@ -246,6 +275,10 @@ impl BLEDevice {
     }
 
     // ── internal helpers ──────────────────────────────────────────────────────
+
+    fn peripheral(&self) -> Option<&Peripheral> {
+        self.peripheral.as_deref()
+    }
 
     fn _abort_all_tasks(&self) {
         let mut tasks = self.notification_tasks.lock().unwrap();

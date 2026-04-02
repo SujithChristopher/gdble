@@ -31,17 +31,17 @@ ENV PATH=$PATH:$ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin
 RUN rustup target add aarch64-linux-android
 
 # Set up environment variables for Rust cross-compilation
-ENV CC_aarch64_linux_android=aarch64-linux-android21-clang
-ENV CXX_aarch64_linux_android=aarch64-linux-android21-clang++
+ENV CC_aarch64_linux_android=aarch64-linux-android31-clang
+ENV CXX_aarch64_linux_android=aarch64-linux-android31-clang++
 ENV AR_aarch64_linux_android=llvm-ar
-ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android21-clang
+ENV CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=aarch64-linux-android31-clang
 
 # Force CMake to recognize Android and skip Linux-specific checks (e.g. dbus)
 ENV CMAKE_TOOLCHAIN_FILE_aarch64_linux_android=/opt/android-ndk/build/cmake/android.toolchain.cmake
 ENV ANDROID_ABI=arm64-v8a
-ENV ANDROID_PLATFORM=android-21
+ENV ANDROID_PLATFORM=android-31
 ENV CMAKE_SYSTEM_NAME=Android
-ENV CMAKE_SYSTEM_VERSION=21
+ENV CMAKE_SYSTEM_VERSION=31
 ENV ANDROID=1
 ENV SIMPLEBLE_BACKEND=Android  
 
