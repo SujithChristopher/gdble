@@ -11,6 +11,7 @@ enum ScanState {
     Idle,
     Scanning,
     Done(Vec<Peripheral>),
+    Error(String),
 }
 
 #[derive(GodotClass)]
@@ -68,7 +69,8 @@ impl GdBLE {
 
     /// Start a non-blocking background scan. Safe to call from the main thread.
     /// Returns false if a scan is already running.
-    /// Poll is_scan_done() each frame; call take_scan_results() when it returns true.
+    /// Poll is_scan_done() or is_scan_error() each frame.
+    /// Call take_scan_results() when is_scan_done() returns true.
     #[func]
     fn start_scan(&self, timeout_seconds: f32) -> bool {
         let timeout = if timeout_seconds <= 0.0 { 5.0 } else { timeout_seconds };
@@ -86,56 +88,114 @@ impl GdBLE {
         let manager_arc = self.manager.clone();
         let scan_state_arc = self.scan_state.clone();
 
+        // NOTE: godot_print!/godot_error! are main-thread-only in gdext's single_threaded
+        // binding. Use println!/eprintln! inside the thread instead.
         std::thread::spawn(move || {
-            // Hold BLE locks only for the duration of the scan, then release
-            // before writing ScanState::Done so take_scan_results() can lock runtime.
-            let peripherals: Vec<Peripheral> = {
-                let runtime_guard = runtime_arc.lock().unwrap();
-                let manager_guard = manager_arc.lock().unwrap();
-
-                if let (Some(runtime), Some(manager)) =
-                    (runtime_guard.as_ref(), manager_guard.as_ref())
-                {
-                    let result = runtime.block_on(async {
-                        let adapters = manager.adapters().await?;
-                        if adapters.is_empty() {
-                            godot_error!("GdBLE: No Bluetooth adapters found");
-                            return Ok::<Vec<Peripheral>, btleplug::Error>(Vec::new());
-                        }
-                        let central = &adapters[0];
-                        godot_print!("GdBLE: Scanning for {} seconds…", timeout);
-                        central.start_scan(ScanFilter::default()).await?;
-                        tokio::time::sleep(
-                            tokio::time::Duration::from_secs_f32(timeout)
-                        ).await;
-                        central.stop_scan().await?;
-                        Ok(central.peripherals().await?)
-                    });
-
-                    match result {
-                        Ok(p) => p,
+            // Wrap the entire thread body to catch panics and surface them to GDScript.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let peripherals: Vec<Peripheral> = {
+                    let runtime_guard = match runtime_arc.lock() {
+                        Ok(g) => g,
                         Err(e) => {
-                            godot_error!("GdBLE: Scan failed: {}", e);
-                            Vec::new()
+                            return Err(format!("runtime mutex poisoned: {}", e));
                         }
+                    };
+                    let manager_guard = match manager_arc.lock() {
+                        Ok(g) => g,
+                        Err(e) => {
+                            return Err(format!("manager mutex poisoned: {}", e));
+                        }
+                    };
+
+                    if let (Some(runtime), Some(manager)) =
+                        (runtime_guard.as_ref(), manager_guard.as_ref())
+                    {
+                        let scan_result = runtime.block_on(async {
+                            let adapters = manager.adapters().await
+                                .map_err(|e| format!("adapters() failed: {}", e))?;
+
+                            if adapters.is_empty() {
+                                return Err("No Bluetooth adapters found".to_string());
+                            }
+
+                            let central = &adapters[0];
+                            println!("GdBLE: Scanning for {} seconds…", timeout);
+
+                            central.start_scan(ScanFilter::default()).await
+                                .map_err(|e| format!("start_scan failed: {}", e))?;
+
+                            tokio::time::sleep(
+                                tokio::time::Duration::from_secs_f32(timeout)
+                            ).await;
+
+                            central.stop_scan().await
+                                .map_err(|e| format!("stop_scan failed: {}", e))?;
+
+                            let peripherals = central.peripherals().await
+                                .map_err(|e| format!("peripherals() failed: {}", e))?;
+
+                            println!("GdBLE: Raw scan found {} peripheral(s)", peripherals.len());
+                            Ok(peripherals)
+                        });
+
+                        match scan_result {
+                            Ok(p) => p,
+                            Err(e) => return Err(e),
+                        }
+                    } else {
+                        return Err("Not initialized — call initialize() first".to_string());
                     }
-                } else {
-                    godot_error!("GdBLE: Not initialized. Call initialize() first.");
-                    Vec::new()
+                    // runtime_guard and manager_guard are dropped here, before ScanState is set
+                };
+
+                Ok(peripherals)
+            }));
+
+            let new_state = match result {
+                Ok(Ok(peripherals)) => ScanState::Done(peripherals),
+                Ok(Err(msg)) => {
+                    eprintln!("GdBLE scan error: {}", msg);
+                    ScanState::Error(msg)
                 }
-                // runtime_guard and manager_guard are dropped here, before ScanState is set
+                Err(_panic) => {
+                    let msg = "scan thread panicked".to_string();
+                    eprintln!("GdBLE: {}", msg);
+                    ScanState::Error(msg)
+                }
             };
 
-            *scan_state_arc.lock().unwrap() = ScanState::Done(peripherals);
+            if let Ok(mut state) = scan_state_arc.lock() {
+                *state = new_state;
+            }
         });
 
         true
     }
 
-    /// Returns true when a scan has finished and results are ready.
+    /// Returns true when a scan has finished successfully and results are ready.
     #[func]
     fn is_scan_done(&self) -> bool {
         matches!(*self.scan_state.lock().unwrap(), ScanState::Done(_))
+    }
+
+    /// Returns true if the scan is currently running.
+    #[func]
+    fn is_scanning(&self) -> bool {
+        matches!(*self.scan_state.lock().unwrap(), ScanState::Scanning)
+    }
+
+    /// Returns a non-empty error string if the last scan failed, empty string otherwise.
+    /// Resets the error state to Idle so a new scan can start.
+    #[func]
+    fn take_scan_error(&self) -> GString {
+        let mut state = self.scan_state.lock().unwrap();
+        if let ScanState::Error(msg) = &*state {
+            let out = GString::from(msg.as_str());
+            *state = ScanState::Idle;
+            out
+        } else {
+            GString::new()
+        }
     }
 
     /// Collect completed scan results as BLEDevice objects and reset state to Idle.
