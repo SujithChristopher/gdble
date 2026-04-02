@@ -1,75 +1,69 @@
 use godot::prelude::*;
 use godot::classes::{RefCounted, IRefCounted};
-use btleplug::api::{Peripheral as _, WriteType};
-use btleplug::platform::Peripheral;
+use simplersble::{Peripheral, ValueChangedEvent};
 use futures::StreamExt;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
-use uuid::Uuid;
 
 #[derive(GodotClass)]
 #[class(base=RefCounted)]
 pub struct BLEDevice {
     base: Base<RefCounted>,
-    peripheral: Arc<Mutex<Peripheral>>,
+    peripheral: Arc<Peripheral>,
     runtime: Arc<Mutex<Option<Runtime>>>,
     name: GString,
     address: GString,
     is_connected: bool,
-    /// Latest raw bytes received per characteristic UUID (populated by background task)
-    notifications: Arc<Mutex<HashMap<Uuid, Vec<u8>>>>,
-    /// Background task handle for the notification stream; aborted on unsubscribe/disconnect
-    notification_task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    /// Latest notification bytes keyed by lowercase characteristic UUID.
+    notifications: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    /// Background tasks draining notification streams; aborted on unsubscribe/disconnect.
+    notification_tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
 }
 
 #[godot_api]
 impl IRefCounted for BLEDevice {
     fn init(base: Base<RefCounted>) -> Self {
+        // This default init is required by gdext but should not be used directly;
+        // use from_peripheral() instead.
         Self {
             base,
-            peripheral: Arc::new(Mutex::new(unsafe { std::mem::zeroed() })),
+            peripheral: Arc::new(unsafe { std::mem::zeroed() }),
             runtime: Arc::new(Mutex::new(None)),
             name: GString::from("Unknown"),
             address: GString::from(""),
             is_connected: false,
             notifications: Arc::new(Mutex::new(HashMap::new())),
-            notification_task: Arc::new(Mutex::new(None)),
+            notification_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
 
 impl BLEDevice {
+    /// Construct a BLEDevice from a scanned peripheral.
+    /// Must be called on the main thread.
     pub fn from_peripheral(
         base: Base<RefCounted>,
         peripheral: Peripheral,
         runtime: Arc<Mutex<Option<Runtime>>>,
     ) -> Self {
-        let runtime_guard = runtime.lock().unwrap();
-        let mut name = GString::from("Unknown");
-        let mut address = GString::from("");
-
-        if let Some(rt) = runtime_guard.as_ref() {
-            if let Ok(Some(props)) = rt.block_on(peripheral.properties()) {
-                if let Some(local_name) = props.local_name {
-                    name = GString::from(local_name.as_str());
-                }
-                address = GString::from(props.address.to_string().as_str());
-            }
-        }
-
-        drop(runtime_guard);
+        let name = peripheral
+            .identifier()
+            .unwrap_or_else(|_| "Unknown".to_string());
+        let address = peripheral
+            .address()
+            .unwrap_or_else(|_| "".to_string());
 
         Self {
             base,
-            peripheral: Arc::new(Mutex::new(peripheral)),
+            peripheral: Arc::new(peripheral),
             runtime,
-            name,
-            address,
+            name: GString::from(name.as_str()),
+            address: GString::from(address.as_str()),
             is_connected: false,
             notifications: Arc::new(Mutex::new(HashMap::new())),
-            notification_task: Arc::new(Mutex::new(None)),
+            notification_tasks: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }
@@ -88,7 +82,7 @@ impl BLEDevice {
         self.address.clone()
     }
 
-    /// Named ble_is_connected to avoid conflict with GDScript's built-in Object.is_connected().
+    /// Named ble_is_connected to avoid conflict with GDScript's built-in is_connected().
     #[func]
     fn ble_is_connected(&self) -> bool {
         self.is_connected
@@ -96,181 +90,114 @@ impl BLEDevice {
 
     // ── connection ────────────────────────────────────────────────────────────
 
-    /// Connect to this device and automatically discover services.
-    /// Blocking — call from a GDScript Thread.
-    /// Named ble_connect to avoid conflict with GDScript's built-in Object.connect().
+    /// Connect to this device and discover services.
+    /// Named ble_connect to avoid conflict with GDScript's built-in connect().
     #[func]
     fn ble_connect(&mut self) -> bool {
-        let runtime_guard = self.runtime.lock().unwrap();
-        let peripheral = self.peripheral.lock().unwrap();
-
-        if let Some(rt) = runtime_guard.as_ref() {
-            match rt.block_on(peripheral.connect()) {
-                Ok(_) => {
-                    godot_print!("GdBLE: Connected to '{}'", self.name);
-                    self.is_connected = true;
-                    if let Err(e) = rt.block_on(peripheral.discover_services()) {
-                        godot_error!("GdBLE: Service discovery failed: {}", e);
-                    }
-                    true
-                }
-                Err(e) => {
-                    godot_error!("GdBLE: Connection to '{}' failed: {}", self.name, e);
-                    false
-                }
+        match self.peripheral.connect() {
+            Ok(_) => {
+                self.is_connected = true;
+                godot_print!("GdBLE: Connected to '{}'", self.name);
+                true
             }
-        } else {
-            godot_error!("GdBLE: Runtime not available");
-            false
+            Err(e) => {
+                godot_error!("GdBLE: Connection failed: {}", e);
+                false
+            }
         }
     }
 
-    /// Disconnect and abort any active notification stream.
-    /// Named ble_disconnect to avoid conflict with GDScript's built-in Object.disconnect().
+    /// Disconnect and abort all active notification streams.
+    /// Named ble_disconnect to avoid conflict with GDScript's built-in disconnect().
     #[func]
     fn ble_disconnect(&mut self) -> bool {
-        self._abort_notification_task();
-
-        let runtime_guard = self.runtime.lock().unwrap();
-        let peripheral = self.peripheral.lock().unwrap();
-
-        if let Some(rt) = runtime_guard.as_ref() {
-            match rt.block_on(peripheral.disconnect()) {
-                Ok(_) => {
-                    godot_print!("GdBLE: Disconnected from '{}'", self.name);
-                    self.is_connected = false;
-                    true
-                }
-                Err(e) => {
-                    godot_error!("GdBLE: Disconnect failed: {}", e);
-                    false
-                }
+        self._abort_all_tasks();
+        match self.peripheral.disconnect() {
+            Ok(_) => {
+                self.is_connected = false;
+                godot_print!("GdBLE: Disconnected from '{}'", self.name);
+                true
             }
-        } else {
-            false
+            Err(e) => {
+                godot_error!("GdBLE: Disconnect failed: {}", e);
+                false
+            }
         }
     }
 
     // ── notifications ─────────────────────────────────────────────────────────
 
     /// Subscribe to a characteristic and start a background listener.
-    /// New values are stored internally; retrieve them with poll_notification().
-    /// The service_uuid parameter is accepted for API consistency but ignored —
-    /// btleplug locates characteristics by UUID alone after discover_services().
+    /// Retrieve data with poll_notification() each frame.
     #[func]
-    fn subscribe(&mut self, _service_uuid: GString, char_uuid: GString) -> bool {
+    fn subscribe(&mut self, service_uuid: GString, char_uuid: GString) -> bool {
         if !self.is_connected {
-            godot_error!("GdBLE: Cannot subscribe — device not connected");
+            godot_error!("GdBLE: Cannot subscribe — not connected");
             return false;
         }
 
-        let char_uuid_parsed = match Uuid::parse_str(&char_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid characteristic UUID: {}", e); return false; }
-        };
+        let svc = service_uuid.to_string();
+        let chr = char_uuid.to_string();
+        let key = chr.to_lowercase();
 
-        // Clone peripheral (btleplug Peripheral is Clone — cheap Arc clone internally)
-        let peripheral_clone = self.peripheral.lock().unwrap().clone();
-
-        // Find the characteristic (synchronously — characteristics already discovered)
-        let char_ref = match peripheral_clone
-            .characteristics()
-            .into_iter()
-            .find(|c| c.uuid == char_uuid_parsed)
-        {
-            Some(c) => c,
-            None => {
-                godot_error!("GdBLE: Characteristic {} not found (was discover_services called?)", char_uuid);
+        // Ask the C++ library to start sending notifications and get the event stream.
+        let stream = match self.peripheral.notify(&svc, &chr) {
+            Ok(s) => s,
+            Err(e) => {
+                godot_error!("GdBLE: notify() failed: {}", e);
                 return false;
             }
         };
 
+        let notifications = self.notifications.clone();
+
+        // Spawn a tokio task to drain the stream into the notifications map.
+        // The task runs on the shared runtime so it stays alive as long as GdBLE does.
         let runtime_guard = self.runtime.lock().unwrap();
-        let rt = match runtime_guard.as_ref() {
-            Some(rt) => rt,
-            None => { godot_error!("GdBLE: Runtime not available"); return false; }
+        let Some(rt) = runtime_guard.as_ref() else {
+            godot_error!("GdBLE: No runtime — was initialize() called?");
+            return false;
         };
 
-        // Subscribe (blocking)
-        let peripheral_for_sub = peripheral_clone.clone();
-        let char_for_sub = char_ref.clone();
-        if let Err(e) = rt.block_on(async move { peripheral_for_sub.subscribe(&char_for_sub).await }) {
-            godot_error!("GdBLE: Subscribe failed: {}", e);
-            return false;
-        }
-
-        // Spawn a background async task to drain the notification stream
-        let notifications_store = self.notifications.clone();
-        let peripheral_for_task = peripheral_clone.clone();
         let handle = rt.handle().clone();
+        drop(runtime_guard);
 
         let task = handle.spawn(async move {
-            match peripheral_for_task.notifications().await {
-                Ok(mut stream) => {
-                    while let Some(notif) = stream.next().await {
-                        notifications_store
-                            .lock()
-                            .unwrap()
-                            .insert(notif.uuid, notif.value);
-                    }
-                    godot_print!("GdBLE: Notification stream closed");
+            let mut stream = std::pin::pin!(stream);
+            while let Some(event) = stream.next().await {
+                if let Ok(ValueChangedEvent::ValueUpdated(data)) = event {
+                    notifications.lock().unwrap().insert(key.clone(), data);
                 }
-                Err(e) => godot_error!("GdBLE: Could not open notification stream: {}", e),
             }
         });
 
-        *self.notification_task.lock().unwrap() = Some(task);
+        self.notification_tasks.lock().unwrap().push(task);
         godot_print!("GdBLE: Subscribed to {}", char_uuid);
         true
     }
 
-    /// Unsubscribe from a characteristic and stop the background listener.
+    /// Unsubscribe from a characteristic.
     #[func]
-    fn unsubscribe(&mut self, _service_uuid: GString, char_uuid: GString) -> bool {
-        if !self.is_connected { return false; }
-
-        let char_uuid_parsed = match Uuid::parse_str(&char_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid UUID: {}", e); return false; }
-        };
-
-        let peripheral_clone = self.peripheral.lock().unwrap().clone();
-        let char_ref = match peripheral_clone
-            .characteristics()
-            .into_iter()
-            .find(|c| c.uuid == char_uuid_parsed)
-        {
-            Some(c) => c,
-            None => return false,
-        };
-
-        self._abort_notification_task();
-
-        let runtime_guard = self.runtime.lock().unwrap();
-        if let Some(rt) = runtime_guard.as_ref() {
-            if let Err(e) = rt.block_on(async move { peripheral_clone.unsubscribe(&char_ref).await }) {
-                godot_error!("GdBLE: Unsubscribe failed: {}", e);
-                return false;
+    fn unsubscribe(&mut self, service_uuid: GString, char_uuid: GString) -> bool {
+        let svc = service_uuid.to_string();
+        let chr = char_uuid.to_string();
+        match self.peripheral.unsubscribe(&svc, &chr) {
+            Ok(_) => true,
+            Err(e) => {
+                godot_error!("GdBLE: unsubscribe failed: {}", e);
+                false
             }
-            true
-        } else {
-            false
         }
     }
 
     /// Return the latest notification bytes for a characteristic UUID, then clear it.
-    /// Returns an empty PackedByteArray if no new data has arrived since the last call.
-    /// Call this every frame from _process() to receive streaming data.
+    /// Returns an empty PackedByteArray if no new data has arrived since last call.
+    /// Call every frame from _process() to receive streaming data.
     #[func]
     fn poll_notification(&self, char_uuid: GString) -> PackedByteArray {
+        let key = char_uuid.to_string().to_lowercase();
         let mut result = PackedByteArray::new();
-
-        let char_uuid_parsed = match Uuid::parse_str(&char_uuid.to_string()) {
-            Ok(u) => u,
-            Err(_) => return result,
-        };
-
-        if let Some(data) = self.notifications.lock().unwrap().remove(&char_uuid_parsed) {
+        if let Some(data) = self.notifications.lock().unwrap().remove(&key) {
             for byte in data {
                 result.push(byte);
             }
@@ -286,124 +213,43 @@ impl BLEDevice {
             godot_error!("GdBLE: Device not connected");
             return false;
         }
-
-        let service_uuid_parsed = match Uuid::parse_str(&service_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid service UUID: {}", e); return false; }
-        };
-
-        let char_uuid_parsed = match Uuid::parse_str(&characteristic_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid characteristic UUID: {}", e); return false; }
-        };
-
-        let runtime_guard = self.runtime.lock().unwrap();
-        let peripheral = self.peripheral.lock().unwrap();
-
-        if let Some(rt) = runtime_guard.as_ref() {
-            let result = rt.block_on(async {
-                let chars = peripheral.characteristics();
-                let char_ref = chars
-                    .iter()
-                    .find(|c| c.service_uuid == service_uuid_parsed && c.uuid == char_uuid_parsed);
-
-                if let Some(ch) = char_ref {
-                    peripheral.write(ch, &data.to_vec(), WriteType::WithoutResponse).await
-                } else {
-                    Err(btleplug::Error::NotSupported("Characteristic not found".to_string()))
-                }
-            });
-
-            match result {
-                Ok(_) => true,
-                Err(e) => { godot_error!("GdBLE: Write failed: {}", e); false }
+        let svc = service_uuid.to_string();
+        let chr = characteristic_uuid.to_string();
+        let bytes = data.to_vec();
+        match self.peripheral.write_command(&svc, &chr, &bytes) {
+            Ok(_) => true,
+            Err(e) => {
+                godot_error!("GdBLE: write_command failed: {}", e);
+                false
             }
-        } else {
-            false
         }
     }
 
     #[func]
     fn read(&self, service_uuid: GString, characteristic_uuid: GString) -> PackedByteArray {
         let mut result = PackedByteArray::new();
-
         if !self.is_connected {
             godot_error!("GdBLE: Device not connected");
             return result;
         }
-
-        let service_uuid_parsed = match Uuid::parse_str(&service_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid service UUID: {}", e); return result; }
-        };
-
-        let char_uuid_parsed = match Uuid::parse_str(&characteristic_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid characteristic UUID: {}", e); return result; }
-        };
-
-        let runtime_guard = self.runtime.lock().unwrap();
-        let peripheral = self.peripheral.lock().unwrap();
-
-        if let Some(rt) = runtime_guard.as_ref() {
-            let read_result = rt.block_on(async {
-                let chars = peripheral.characteristics();
-                let char_ref = chars
-                    .iter()
-                    .find(|c| c.service_uuid == service_uuid_parsed && c.uuid == char_uuid_parsed);
-
-                if let Some(ch) = char_ref {
-                    peripheral.read(ch).await
-                } else {
-                    Err(btleplug::Error::NotSupported("Characteristic not found".to_string()))
+        let svc = service_uuid.to_string();
+        let chr = characteristic_uuid.to_string();
+        match self.peripheral.read(&svc, &chr) {
+            Ok(data) => {
+                for byte in data {
+                    result.push(byte);
                 }
-            });
-
-            match read_result {
-                Ok(data) => { for byte in data { result.push(byte); } }
-                Err(e) => { godot_error!("GdBLE: Read failed: {}", e); }
             }
+            Err(e) => godot_error!("GdBLE: read failed: {}", e),
         }
         result
     }
 
-    // ── service discovery ─────────────────────────────────────────────────────
-
-    #[func]
-    fn get_services(&self) -> PackedStringArray {
-        let mut services = PackedStringArray::new();
-        if !self.is_connected { return services; }
-        let peripheral = self.peripheral.lock().unwrap();
-        let mut seen = std::collections::HashSet::new();
-        for ch in peripheral.characteristics() {
-            if seen.insert(ch.service_uuid) {
-                services.push(ch.service_uuid.to_string().as_str());
-            }
-        }
-        services
-    }
-
-    #[func]
-    fn get_characteristics(&self, service_uuid: GString) -> PackedStringArray {
-        let mut chars = PackedStringArray::new();
-        if !self.is_connected { return chars; }
-        let svc_uuid = match Uuid::parse_str(&service_uuid.to_string()) {
-            Ok(u) => u,
-            Err(e) => { godot_error!("GdBLE: Invalid service UUID: {}", e); return chars; }
-        };
-        let peripheral = self.peripheral.lock().unwrap();
-        for ch in peripheral.characteristics() {
-            if ch.service_uuid == svc_uuid {
-                chars.push(ch.uuid.to_string().as_str());
-            }
-        }
-        chars
-    }
-
     // ── internal helpers ──────────────────────────────────────────────────────
 
-    fn _abort_notification_task(&self) {
-        if let Some(task) = self.notification_task.lock().unwrap().take() {
+    fn _abort_all_tasks(&self) {
+        let mut tasks = self.notification_tasks.lock().unwrap();
+        for task in tasks.drain(..) {
             task.abort();
         }
     }
