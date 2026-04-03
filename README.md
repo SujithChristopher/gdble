@@ -16,6 +16,7 @@
 - Read and write to BLE characteristics
 - Discover services and characteristics
 - Cross-platform support (Windows, Linux, macOS)
+- Experimental Android arm64 build support
 
 ## Building
 
@@ -23,6 +24,7 @@
 
 - Rust toolchain (https://rustup.rs/)
 - Godot 4.2 or later
+- Podman (for Android builds)
 
 ### Build Steps
 
@@ -43,6 +45,11 @@ build.bat
 ```bash
 chmod +x build.sh
 ./build.sh
+```
+
+**Android (Windows/PowerShell):**
+```powershell
+./build_android.ps1
 ```
 
 The build script will automatically detect your platform and compile the library to the correct location in `addons/gdble/bin/`.
@@ -159,6 +166,11 @@ Represents a Bluetooth LE device.
 ### macOS
 - Requires macOS 10.13 or later
 - Bluetooth permissions may need to be granted
+
+### Android
+- Experimental arm64 (`arm64-v8a`) build support is available through `build_android.ps1`
+- The current Android container targets API 31 because the upstream SimpleBLE Android backend links against libraries provided there
+- Your Android export still needs the appropriate BLE permissions in the manifest/export preset
 
 ## License
 

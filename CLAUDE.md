@@ -92,3 +92,18 @@ The API is designed to be Pythonic and simple:
 - btleplug handles platform-specific Bluetooth APIs (Windows WinRT, Linux BlueZ, macOS CoreBluetooth)
 - Build scripts must target specific platforms and copy to correct bin folders
 - The `.gdextension` file maps each platform/arch combination to its binary location
+
+## Fantety GDBLE (Alternative Source)
+
+`fantety_gdble/` is a git submodule of https://github.com/Fantety/GDBLE.git — an alternative BLE implementation.
+- Has `.gdignore` to prevent Godot from scanning it (would cause duplicate `.gdextension` conflicts)
+- Excluded from Android export via `exclude_filter="fantety_gdble/*,gdble_src/*"` in `export_presets.cfg`
+- Cross-compilation config in `fantety_gdble/.cargo/config.toml` uses NDK 29.0.13846066 at `C:\Users\Pintu\AppData\Local\Android\Sdk\ndk\29.0.13846066`
+- Build for Android: `cd fantety_gdble && cargo build --release --target aarch64-linux-android`
+
+## gdext Version Compatibility
+
+- **Godot 4.5**: use `godot = "0.4.5"` (gdext 0.4.x)
+- **Godot 4.6**: use `godot = { version = "0.5.0", features = ["api-4-6"] }` (gdext 0.5.x)
+- Version mismatch loads on Windows with "safeguards balanced" warning but **silently fails on Android**
+- gdext 0.5.0 breaking change: `dict.set()` requires `&` for `Array`, `Dictionary`, `GString`, `PackedByteArray`, `Variant` args

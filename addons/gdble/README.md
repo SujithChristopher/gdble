@@ -6,6 +6,12 @@ A simple, Pythonic Bluetooth LE (BLE) extension for Godot 4, built with Rust usi
 
 **⚠️ Experimental / In Development** - This project is in early development and the API may change.
 
+## Android Build
+
+- Experimental Android arm64 (`arm64-v8a`) builds are available through `build_android.ps1`
+- The Android build uses Podman and currently targets API 31
+- Your Android export still needs the appropriate BLE permissions in the manifest/export preset
+
 ## Installation
 
 Copy the entire `addons/gdble/` folder to your Godot project's `addons/` directory, then enable the plugin in Godot:
